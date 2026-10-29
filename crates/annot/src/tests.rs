@@ -2166,3 +2166,23 @@ fn degenerate_and_absurd_leader_and_caption_values_do_not_panic() {
     assert!(long.contains(&format!("({}) Tj", "w".repeat(256))), "cut to 256");
     assert!(!long.contains(&"w".repeat(257)));
 }
+
+/// A cloudy polygon whose finite but absurd vertices (1e300) used to draw 20,000 bumps of 300-digit
+/// numbers each: a ~40 MB appearance stream built on every redraw of a hostile file.
+#[test]
+fn cloudy_polygon_with_absurd_vertices_stays_small() {
+    for big in [1e300, 1e15, f64::MAX] {
+        let mut d = pdfcraft_cos::Dict::new();
+        d.set(b"Subtype".to_vec(), Object::name("Polygon"));
+        d.set(b"Rect".to_vec(), Object::Array([0.0, 0.0, 300.0, 300.0].into_iter().map(Object::Real).collect()));
+        d.set(b"C".to_vec(), Object::Array([1.0, 0.0, 0.0].into_iter().map(Object::Real).collect()));
+        d.set(b"Vertices".to_vec(), Object::Array([0.0, 0.0, big, 0.0, big, big, 0.0, big].into_iter().map(Object::Real).collect()));
+        let mut be = pdfcraft_cos::Dict::new();
+        be.set(b"S".to_vec(), Object::name("C"));
+        d.set(b"BE".to_vec(), Object::Dict(be));
+        let started = std::time::Instant::now();
+        let len = crate::appearance::build(&d).map_or(0, |s| s.decoded().map_or(0, |b| b.len()));
+        assert!(len < 1_000_000, "{big}: {len} bytes of appearance stream");
+        assert!(started.elapsed().as_secs() < 1, "{big}: took {:?}", started.elapsed());
+    }
+}
