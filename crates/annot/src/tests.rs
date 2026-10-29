@@ -2181,7 +2181,8 @@ fn cloudy_polygon_with_absurd_vertices_stays_small() {
         be.set(b"S".to_vec(), Object::name("C"));
         d.set(b"BE".to_vec(), Object::Dict(be));
         let started = std::time::Instant::now();
-        let len = crate::appearance::build(&d).map_or(0, |s| s.decoded().map_or(0, |b| b.len()));
+        let stream = crate::appearance::build(&d).unwrap_or_else(|| panic!("{big}: no appearance was built"));
+        let len = stream.decoded().unwrap_or_else(|_| panic!("{big}: the appearance did not decode")).len();
         assert!(len < 1_000_000, "{big}: {len} bytes of appearance stream");
         assert!(started.elapsed().as_secs() < 1, "{big}: took {:?}", started.elapsed());
     }
