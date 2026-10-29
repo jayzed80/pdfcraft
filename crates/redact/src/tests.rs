@@ -3098,3 +3098,25 @@ fn a_reply_on_another_page_to_a_removed_popup_goes_too() {
         assert!(!bytes.windows(gone.len()).any(|w| w == gone), "{} survived", String::from_utf8_lossy(gone));
     }
 }
+
+#[test]
+fn absurd_text_state_and_matrix_numbers_never_panic_or_hang() {
+    let streams: [&[u8]; 6] = [
+        b"BT /F1 1e300 Tf 1e300 Tc 1e300 Tw 1e300 Tz 1e300 TL 1e300 1e300 Td (AB CD) Tj T* (EF) ' ET",
+        b"1e300 0 0 1e300 -1e300 1e300 cm BT /F1 12 Tf (AB CD) Tj ET",
+        b"BT /F1 -1e300 Tf 0 Tz (AB) Tj [(A) -1e300 (B) 1e300] TJ ET",
+        b"BT /F1 12 Tf 1e308 1e308 1e308 1e308 1e308 1e308 Tm (AB) Tj 1e308 1e308 Td (CD) Tj ET",
+        b"BT /F1 12 Tf 99999999999999999999999999 Tr (AB) Tj 1e999 Ts (CD) Tj ET",
+        b"q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q Q BT /F1 12 Tf (AB) Tj ET",
+    ];
+    for s in streams {
+        let mut doc = one_page(s, "", vec![]);
+        mark(&mut doc, 0, &[[0.0, 0.0, 300.0, 300.0]], "");
+        let t = std::time::Instant::now();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = apply(&mut doc, None);
+        }));
+        assert!(r.is_ok(), "panicked on {}", String::from_utf8_lossy(s));
+        assert!(t.elapsed().as_secs() < 5, "slow on {}", String::from_utf8_lossy(s));
+    }
+}
