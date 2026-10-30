@@ -2066,3 +2066,24 @@ fn an_fdf_comment_popup_without_a_rect_is_dropped() {
     let popups = page.iter().filter(|a| dst.resolve(a).as_dict().is_some_and(|d| d.name(b"Subtype") == Some(b"Popup".as_slice()))).count();
     assert_eq!(popups, 0);
 }
+
+/// Every prefix and every single-byte corruption of a real export imports or errors, never panics.
+#[test]
+fn damaged_exports_never_panic_on_import() {
+    let src = filled();
+    let mut samples = vec![export_xfdf(&src, true, true, "a.pdf").into_bytes(), export_fdf(&src, true, true, "a.pdf").unwrap()];
+    samples.push(export_data(&src, Format::Csv).into_bytes());
+    for bytes in samples {
+        for cut in 0..=bytes.len() {
+            let _ = import(&mut blank(), &bytes[..cut]);
+        }
+        for i in 0..bytes.len() {
+            for v in [b'<', 0xff] {
+                let mut b = bytes.clone();
+                b[i] = v;
+                let _ = import(&mut blank(), &b);
+                let _ = data_values(&b);
+            }
+        }
+    }
+}
