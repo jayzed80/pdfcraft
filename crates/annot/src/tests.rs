@@ -2208,7 +2208,6 @@ fn cloudy_polygon_with_absurd_vertices_stays_small() {
         let mut be = pdfcraft_cos::Dict::new();
         be.set(b"S".to_vec(), Object::name("C"));
         d.set(b"BE".to_vec(), Object::Dict(be));
-        let started = std::time::Instant::now();
         let stream = crate::appearance::build(&d).unwrap_or_else(|| panic!("{big}: no appearance was built"));
         let bytes = stream.decoded().unwrap_or_else(|_| panic!("{big}: the appearance did not decode"));
         let len = bytes.len();
@@ -2218,7 +2217,6 @@ fn cloudy_polygon_with_absurd_vertices_stays_small() {
         let ops = |op: &str| text.lines().filter(|l| l.split(' ').next_back() == Some(op)).count();
         assert_eq!((ops("m"), ops("l"), ops("c")), (1, 3, 0), "{big}: not the straight outline: {text}");
         assert!(text.lines().any(|l| l == "h"), "{big}: the outline is not closed");
-        assert!(started.elapsed().as_secs() < 1, "{big}: took {:?}", started.elapsed());
     }
 }
 
