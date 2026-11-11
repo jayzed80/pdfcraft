@@ -1,8 +1,8 @@
 use super::appearances::{declares_pdfa, need_appearances};
 use super::read::{acroform, field_flags, fields, listed_indices, listing_fields_named, page_refs, selected_options};
 use super::{
-    Dict, Document, Field, FieldEvent, FieldKind, FieldValue, FormError, LazyPool, NoScripts, ObjRef, Object, PdfString, Scripts, Widget, af,
-    appearance, author, calc_order, flags, invalid, name_obj, scripting,
+    BatchGlyphs, Dict, Document, Field, FieldEvent, FieldKind, FieldValue, FormError, LazyPool, NoScripts, ObjRef, Object, PdfString, Scripts,
+    Widget, af, appearance, author, calc_order, flags, invalid, name_obj, scripting,
 };
 
 // ── writing ─────────────────────────────────────────────────────────────────────────────────
@@ -17,7 +17,24 @@ pub fn set_value_with(doc: &mut Document, name: &str, value: &FieldValue, script
     set_value_in(doc, name, value, scripts, &mut LazyPool::new())
 }
 
-/// [`set_value_with`], storing glyph procedures through `pool` (one per public call).
+/// [`set_value_with`] as one of a batch of value edits: the glyph procedures its appearances draw
+/// are stored through `glyphs`, which the batch keeps from one value to the next, so the form is
+/// read for them once per batch rather than once per value (#6943). What is drawn is what
+/// [`set_value_with`] would draw, one value after another, and so is what is stored, with one
+/// difference that only saves objects: a glyph procedure of a value the batch later replaced is
+/// still found, where reading the form again would no longer see it and store it anew. See
+/// [`BatchGlyphs`] for when to start a new one.
+pub fn set_value_in_batch(
+    doc: &mut Document,
+    name: &str,
+    value: &FieldValue,
+    scripts: &mut dyn Scripts,
+    glyphs: &mut BatchGlyphs,
+) -> Result<(), FormError> {
+    set_value_in(doc, name, value, scripts, &mut glyphs.pool)
+}
+
+/// [`set_value_with`], storing glyph procedures through `pool` (one per public call or batch).
 fn set_value_in(doc: &mut Document, name: &str, value: &FieldValue, scripts: &mut dyn Scripts, pool: &mut LazyPool) -> Result<(), FormError> {
     let all = fields(doc);
     if all.is_empty() {

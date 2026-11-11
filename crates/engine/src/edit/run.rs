@@ -260,6 +260,9 @@ pub(crate) struct EditCtx {
     /// What [`Edit::PrepareText`] prepared, repaired and left grouped, for
     /// [`Session::prepare_text`](crate::Session::prepare_text).
     pub(crate) prepared: Option<pdfcraft_edit::text::forms::Preparation>,
+    /// The form's glyph procedures, shared by the value edits in a row of a batch ([`run_batch`]);
+    /// `None` outside one.
+    pub(crate) field_glyphs: Option<pdfcraft_forms::BatchGlyphs>,
 }
 
 impl EditCtx {
@@ -311,6 +314,7 @@ impl EditCtx {
             redaction_elsewhere: None,
             redaction_identification: pdfcraft_redact::Identification::default(),
             prepared: None,
+            field_glyphs: None,
         }
     }
 
@@ -710,9 +714,17 @@ pub(crate) fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut E
             pdfcraft_annot::set_info(doc, *page, *index, author.as_deref(), subject.as_deref(), *icon, &cx.meta())?;
         }
         Edit::SetFieldValue { name, value } => {
-            let mut set = |doc: &mut pdfcraft_cos::Document, value: &FieldValue| match cx.js.as_mut() {
-                Some(js) => pdfcraft_forms::set_value_with(doc, name, value, js),
-                None => pdfcraft_forms::set_value(doc, name, value),
+            let mut no_scripts = pdfcraft_forms::NoScripts;
+            let scripts: &mut dyn pdfcraft_forms::Scripts = match cx.js.as_mut() {
+                Some(js) => js,
+                None => &mut no_scripts,
+            };
+            // In a batch, the value edits in a row share the form's glyph procedures, read once
+            // (#6943); on its own, an edit reads them itself.
+            let glyphs = &mut cx.field_glyphs;
+            let mut set = |doc: &mut pdfcraft_cos::Document, value: &FieldValue| match glyphs.as_mut() {
+                Some(glyphs) => pdfcraft_forms::set_value_in_batch(doc, name, value, scripts, glyphs),
+                None => pdfcraft_forms::set_value_with(doc, name, value, scripts),
             };
             // A date typed by another of an XFA date field's patterns is kept in the first, before
             // the field's format reads it more loosely (`18OCT16` in a `YYYYMMDD|DDMMMYY` field is
@@ -1076,10 +1088,31 @@ pub(crate) fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut E
             if edits.iter().any(|e| matches!(e, Edit::XfaEvent { .. })) {
                 return Err(EditError::Invalid("a form script event can't be part of a batch of edits".into()));
             }
-            for e in edits {
-                run_edit(doc, e, cx)?;
-            }
+            let shared = run_batch(doc, edits, cx);
+            cx.field_glyphs = None;
+            shared?;
         }
+    }
+    Ok(())
+}
+
+/// Run a batch's edits in order. Value edits in a row keep one [`pdfcraft_forms::BatchGlyphs`],
+/// so filling a thousand fields reads the form for its glyph procedures once, not once per field
+/// (#6943).
+///
+/// Guard: any other edit (a nested batch too) ends the run and drops the pool before it runs. It
+/// may store or remove glyph procedures, or redraw fields, without the pool knowing; the next value
+/// edit starts a new one, read from the document as that edit left it. So each value edit stores
+/// what it would store on its own, and the pool never outlives the batch (an undo replaces the
+/// document it points into).
+fn run_batch(doc: &mut pdfcraft_cos::Document, edits: &[Edit], cx: &mut EditCtx) -> Result<(), EditError> {
+    for e in edits {
+        if matches!(e, Edit::SetFieldValue { .. }) {
+            cx.field_glyphs.get_or_insert_with(pdfcraft_forms::BatchGlyphs::new);
+        } else {
+            cx.field_glyphs = None;
+        }
+        run_edit(doc, e, cx)?;
     }
     Ok(())
 }

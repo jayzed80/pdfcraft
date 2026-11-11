@@ -38,6 +38,7 @@ pub use scripting::{
 mod appearances;
 mod glyph_pool;
 use glyph_pool::LazyPool;
+pub use glyph_pool::{BatchGlyphs, glyph_pool_seeds};
 mod read;
 mod tab_order;
 mod values;
@@ -56,7 +57,7 @@ use values::write_value;
 pub(crate) use values::{ask_viewers_to_redraw, merged_appearance, recalculate_in};
 pub use values::{
     calculations_changed, clear_password_values, has_password_values, password_values, recalculate, recalculate_with, reset, restore_password_values,
-    set_value, set_value_with, set_values,
+    set_value, set_value_in_batch, set_value_with, set_values,
 };
 
 #[cfg(test)]

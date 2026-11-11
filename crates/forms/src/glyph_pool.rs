@@ -13,10 +13,17 @@ use pdfcraft_fonts::shaped_text::{GlyphPool, store_streams, store_streams_pooled
 
 use crate::read::fields;
 
-#[cfg(test)]
 thread_local! {
-    /// How many times [`glyph_pool`] read the form's widgets, for tests.
+    /// How many times [`glyph_pool`] read the form's widgets on this thread, for tests (here and
+    /// in the crates that fill forms) that check a batch reads them once.
     pub(crate) static SEEDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread has read a form's widgets for their glyph procedures. Only for
+/// tests: one batch of value edits should add one, however many values it fills (#6943).
+#[doc(hidden)]
+pub fn glyph_pool_seeds() -> usize {
+    SEEDS.with(std::cell::Cell::get)
 }
 
 /// A glyph pool read from the document the first time an appearance with a Type 3 font is stored,
@@ -27,6 +34,29 @@ thread_local! {
 #[derive(Default)]
 pub(crate) struct LazyPool {
     pool: Option<GlyphPool>,
+}
+
+/// The glyph procedures of a form, kept by a caller across several value edits of one batch
+/// ([`set_value_in_batch`](crate::set_value_in_batch)), so the batch reads the form for them once
+/// instead of once per value (#6943): with a thousand fields that reading cost more than the fill.
+///
+/// Guard: keep one only while value edits follow one another on the same document, and drop it
+/// when the batch ends or any other edit runs in between. Each value edit of the batch adds what
+/// it stores to it, so it knows everything filling the values one by one would read back from the
+/// form; an edit that doesn't fill through it (a reset, a new field, a page deleted) stores what
+/// it doesn't know, and a pool kept past an undo would point into a document that is gone. A stale
+/// entry can't draw a wrong glyph (each match is compared in full against the document first),
+/// but it could store a procedure twice, which is what the pool is there to stop.
+#[derive(Default)]
+pub struct BatchGlyphs {
+    pub(crate) pool: LazyPool,
+}
+
+impl BatchGlyphs {
+    /// A pool not yet read from any document: the first appearance with a Type 3 font reads it.
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 impl LazyPool {
@@ -62,8 +92,7 @@ fn has_type3_font(d: &Dict) -> bool {
 /// never a chain, so a cyclic or deep file can't make it loop; what isn't what it should be is
 /// passed over, and `GlyphPool::remember_font` bounds how much it reads.
 fn glyph_pool(doc: &Document) -> GlyphPool {
-    #[cfg(test)]
-    SEEDS.with(|c| c.set(c.get() + 1));
+    SEEDS.with(|c| c.set(c.get().saturating_add(1)));
     let mut pool = GlyphPool::new();
     for f in fields(doc) {
         for w in &f.widgets {

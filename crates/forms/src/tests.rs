@@ -7324,6 +7324,67 @@ fn a_batch_shares_glyph_procedures_and_reads_the_form_for_them_once() {
     assert_greek_glyphs_shared(&doc);
 }
 
+/// The values of [`values_filled_in_one_batch_store_what_one_by_one_fills_store`]: Greek, Latin,
+/// Greek again over a value drawn earlier in the batch, and a name that doesn't exist.
+fn batch_values() -> Vec<(&'static str, FieldValue)> {
+    vec![
+        ("greek", FieldValue::Text(GREEK.into())),
+        ("western", FieldValue::Text("Café".into())),
+        ("mixed", FieldValue::Text(MIXED.into())),
+        ("nowhere", FieldValue::Text(GREEK.into())),
+        ("greek", FieldValue::Text("σου Γειά ok".into())),
+    ]
+}
+
+/// #6943: value edits of one batch that keep one `BatchGlyphs` read the form for glyphs once,
+/// and leave the document as filling them one call each does: the same results, the same
+/// objects, the same saved bytes, every glyph procedure still stored once.
+#[test]
+fn values_filled_in_one_batch_store_what_one_by_one_fills_store() {
+    let mut one_by_one = greek_form(&[], "", "");
+    let expected: Vec<Result<(), FormError>> = batch_values().iter().map(|(n, v)| set_value(&mut one_by_one, n, v)).collect();
+    let mut batch = greek_form(&[], "", "");
+    let before = glyph_pool_seeds();
+    let mut glyphs = BatchGlyphs::new();
+    let results: Vec<Result<(), FormError>> =
+        batch_values().iter().map(|(n, v)| set_value_in_batch(&mut batch, n, v, &mut NoScripts, &mut glyphs)).collect();
+    assert_eq!(glyph_pool_seeds() - before, 1, "one reading of the form's glyphs for the batch");
+    assert_eq!(results, expected);
+    assert!(results[3].is_err() && results.iter().filter(|r| r.is_ok()).count() == 4);
+    let saved = |doc: &Document| write_incremental(doc, &SaveOptions::default()).expect("writes");
+    assert_eq!(saved(&batch), saved(&one_by_one), "the same file, byte for byte");
+    let doc = reopen(&batch);
+    assert_eq!(
+        glyph_and_map_streams(&doc).0,
+        distinct_clusters(&[MIXED, "σου Γειά ok"]).len(),
+        "each glyph the fields draw stored once, and nothing more"
+    );
+    for name in ["greek", "mixed"] {
+        assert_drawn_as_generated(&doc, name);
+    }
+}
+
+/// #6943: a batch pool kept past an edit that redraws a field in another font (which the engine
+/// never does: it starts a new pool after any other edit) still draws every field as generated:
+/// a glyph is shared only after it is compared in full with what the document holds.
+#[test]
+fn a_batch_pool_kept_past_a_font_change_still_draws_each_field_as_generated() {
+    let mut doc = greek_form(&[], "", "");
+    let mut glyphs = BatchGlyphs::new();
+    set_value_in_batch(&mut doc, "mixed", &FieldValue::Text(MIXED.into()), &mut NoScripts, &mut glyphs).unwrap();
+    let times = FieldProps { appearance: Some(LookPatch { font: Some(FieldFont::Times), ..LookPatch::default() }), ..FieldProps::default() };
+    set_props(&mut doc, "mixed", &times).unwrap();
+    set_props(&mut doc, "greek", &times).unwrap();
+    set_value_in_batch(&mut doc, "greek", &FieldValue::Text(GREEK.into()), &mut NoScripts, &mut glyphs).unwrap();
+    set_value_in_batch(&mut doc, "mixed", &FieldValue::Text(format!("{MIXED} again")), &mut NoScripts, &mut glyphs).unwrap();
+    let doc = reopen(&doc);
+    for name in ["greek", "mixed"] {
+        assert_drawn_as_generated(&doc, name);
+        assert!(normal_appearance(&doc, name).dict.get(b"Resources").is_some());
+    }
+    assert!(undrawn_fields(&doc).is_empty());
+}
+
 /// #6867: glyphs a saved file already holds are found after it is opened again: filling another
 /// field refers to them rather than storing them again.
 #[test]
