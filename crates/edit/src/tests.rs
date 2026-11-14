@@ -2639,6 +2639,8 @@ fn styled_fallback_batches_keep_face_choices_and_range_styles() {
     let range = |range, family, bold| text::RangeStyle {
         range,
         family: Some((family, bold, false)),
+        bold: None,
+        italic: None,
         resource: None,
         size: None,
         color: None,
@@ -7956,6 +7958,8 @@ fn an_ocr_rewrite_goes_on_top_of_paint_over_where_it_lands() {
     let range = text::RangeStyle {
         range: 0..2,
         family: None,
+        bold: None,
+        italic: None,
         resource: None,
         size: Some(120.0),
         color: None,
@@ -8435,6 +8439,8 @@ fn disjoint_style_ranges_preserve_unselected_runs_and_validate_utf8_atomically()
             RangeStyle {
                 range: a..a + 5,
                 family: None,
+                bold: None,
+                italic: None,
                 resource: None,
                 size: Some(15.0),
                 color: Some([0.8, 0.1, 0.2]),
@@ -8445,6 +8451,8 @@ fn disjoint_style_ranges_preserve_unselected_runs_and_validate_utf8_atomically()
             RangeStyle {
                 range: b..b + 4,
                 family: Some((Family::Courier, false, true)),
+                bold: None,
+                italic: None,
                 resource: None,
                 size: None,
                 color: None,
@@ -8474,6 +8482,8 @@ fn disjoint_style_ranges_preserve_unselected_runs_and_validate_utf8_atomically()
         ranges: vec![RangeStyle {
             range: 1..2,
             family: None,
+            bold: None,
+            italic: None,
             resource: None,
             size: Some(12.0),
             color: None,
@@ -8896,6 +8906,8 @@ fn turned_paragraph_keeps_its_line_breaks_when_a_word_is_added() {
     let range = text::RangeStyle {
         range: 0..4,
         family: None,
+        bold: None,
+        italic: None,
         resource: None,
         size: Some(20.0),
         color: None,
@@ -9169,6 +9181,8 @@ fn rows_the_edit_does_not_reach_keep_their_source_operators() {
     let range = text::RangeStyle {
         range: at..at + 4,
         family: None,
+        bold: None,
+        italic: None,
         resource: None,
         size: None,
         color: Some([1.0, 0.0, 0.0]),
@@ -11918,6 +11932,8 @@ fn carriage_returns_break_rows_on_the_styled_path() {
     let red = text::RangeStyle {
         range: 0..3,
         family: None,
+        bold: None,
+        italic: None,
         resource: None,
         size: None,
         color: Some([1.0, 0.0, 0.0]),
@@ -12022,6 +12038,8 @@ fn spaces_and_indents_in_a_subset_without_a_space_glyph_round_trip_across_edits(
         ranges: vec![text::RangeStyle {
             range: 2..5,
             family: None,
+            bold: None,
+            italic: None,
             resource: None,
             size: None,
             color: Some([1.0, 0.0, 0.0]),
@@ -12045,6 +12063,8 @@ fn a_reassigned_subset_space_keeps_its_own_underline() {
         ranges: vec![text::RangeStyle {
             range: 2..5,
             family: None,
+            bold: None,
+            italic: None,
             resource: None,
             size: None,
             color: None,
@@ -14233,6 +14253,8 @@ fn explicit_builtin_thai_replaces_an_unavailable_source_without_installing_a_fon
             range: 0..1,
             resource: Some("builtin:thai".into()),
             family: None,
+            bold: None,
+            italic: None,
             size: None,
             color: None,
             underline: None,
@@ -15343,6 +15365,8 @@ fn unicode_row_breaks_break_the_row_instead_of_needing_a_glyph() {
     let red = text::RangeStyle {
         range: 0..3,
         family: None,
+        bold: None,
+        italic: None,
         resource: None,
         size: None,
         color: Some([1.0, 0.0, 0.0]),

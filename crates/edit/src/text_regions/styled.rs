@@ -582,8 +582,10 @@ fn calibration_factors(
                 source.origin.state.word_spacing,
             ) * source.origin.state.scale
                 * across(source);
-            let changed_face =
-                style.resource.is_some() || overrides.get(&index).is_some_and(|range| range.family.is_some() || range.resource.is_some());
+            let changed_face = style.resource.is_some()
+                || overrides
+                    .get(&index)
+                    .is_some_and(|range| range.family.is_some() || range.bold.is_some() || range.italic.is_some() || range.resource.is_some());
             let factor = if nominal > 0.0 && !changed_face { ((source.rect[2] - source.rect[0]) / nominal).clamp(0.5, 2.0) } else { 1.0 };
             calibration.insert(index, factor);
         }
@@ -835,6 +837,8 @@ fn apply_range_styles<'a>(
                 let default_range = RangeStyle {
                     range: start..end,
                     family: None,
+                    bold: None,
+                    italic: None,
                     resource: None,
                     size: None,
                     color: None,
@@ -844,9 +848,15 @@ fn apply_range_styles<'a>(
                 };
                 let range = selected.unwrap_or(&default_range);
                 let mut line = lines.get(source).unwrap_or(first).clone();
-                if let Some((family, bold, italic)) =
-                    range.family.or(style.family).or_else(|| style.bold.map(|b| (source_family(&line.base_font), b, line.italic)))
-                {
+                let block = style.family.or_else(|| style.bold.map(|b| (source_family(&line.base_font), b, line.italic)));
+                let face = range.family.or_else(|| {
+                    if range.bold.is_none() && range.italic.is_none() {
+                        return block;
+                    }
+                    let (family, bold, italic) = block.unwrap_or((source_family(&line.base_font), line.bold, line.italic));
+                    Some((family, range.bold.unwrap_or(bold), range.italic.unwrap_or(italic)))
+                });
+                if let Some((family, bold, italic)) = face {
                     let base = family.base_font(bold, italic);
                     line.font = format!("PCRange{}", base.replace('-', ""));
                     line.base_font = base.to_owned();

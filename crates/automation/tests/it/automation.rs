@@ -785,6 +785,36 @@ fn explicit_font_and_disjoint_ranges_save_reopen_through_tools() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// #7275: a range's `bold` or `italic` without `font` keeps the source family and changes only
+/// the weight or slant, through save and reopen, instead of being dropped.
+#[test]
+fn range_bold_or_italic_without_font_keeps_the_family_and_survives_save() {
+    let dir = workdir("range-bold-italic");
+    std::fs::write(dir.join("a.pdf"), same_text_pages(1, "BT /F1 24 Tf 1 0 0 1 40 100 Tm (Alpha beta gamma.) Tj ET\n")).unwrap();
+    let mut a = auto(&dir);
+    for (case, range, face) in [
+        ("bold", json!({"range":[6,10],"bold":true}), "Helvetica-Bold"),
+        ("italic", json!({"range":[6,10],"italic":true}), "Helvetica-Oblique"),
+        ("both", json!({"range":[6,10],"bold":true,"italic":true}), "Helvetica-BoldOblique"),
+    ] {
+        let id = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+        ok(&mut a, "text_edit", json!({"doc":id,"page":1,"paragraph":1,"ranges":[range]}));
+        let path = format!("{case}.pdf");
+        ok(&mut a, "doc_save", json!({"doc":id,"path":path}));
+        let reopened = ok(&mut a, "doc_open", json!({"path":path}))["doc"].as_u64().unwrap();
+        let lines = ok(&mut a, "text_lines", json!({"doc":reopened,"page":1}));
+        let fonts: Vec<(String, String)> = lines["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| (l["text"].as_str().unwrap().trim().to_owned(), l["font"].as_str().unwrap().to_owned()))
+            .collect();
+        assert!(fonts.iter().any(|(text, font)| text == "beta" && font == face), "{case}: {fonts:?}");
+        assert!(fonts.iter().any(|(text, font)| text == "Alpha" && font == "Helvetica"), "{case}: {fonts:?}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn added_arabic_text_keeps_copy_search_and_editor_order_after_retyping_and_reopen() {
     if pdfcraft_fonts::document_arabic_font().is_none() {
