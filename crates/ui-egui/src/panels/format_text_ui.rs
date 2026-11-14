@@ -175,12 +175,8 @@ pub(crate) fn panel(
                     if ui.selectable_label(false, tl!("Load font…")).clicked() {
                         out.font = Some(FontChoice::Load);
                     }
-                    // A click inside the submenu (its search field, Reload, its scroll bar) keeps it
-                    // and the font list open: a font closes them itself (#7301).
                     #[cfg(not(target_arch = "wasm32"))]
-                    let keep_open = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-                    #[cfg(not(target_arch = "wasm32"))]
-                    let _ = egui::containers::menu::SubMenuButton::new(tl!("Installed fonts…")).config(keep_open).ui(ui, |ui| {
+                    ui.menu_button(tl!("Installed fonts…"), |ui| {
                         ui.set_min_width(260.0);
                         let reload = ui.button(tl!("Reload")).clicked();
                         match crate::files::installed_font_files(ui.ctx(), reload) {
