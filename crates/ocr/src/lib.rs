@@ -145,26 +145,11 @@ impl OcrImage {
     }
 }
 
-/// Which way a word reads in the image it was recognised in. A box alone cannot say: a word
-/// turned a quarter has a tall box, and it is read along the box's long edge.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum WordDirection {
-    /// Upright: read left to right along the box's bottom edge.
-    #[default]
-    Across,
-    /// Turned a quarter clockwise: read top to bottom, the letters' tops toward the right.
-    Down,
-    /// Turned a quarter counter-clockwise: read bottom to top, the letters' tops toward the left.
-    Up,
-}
-
 /// A recognised word: its text and its box in image pixels `[left, top, right, bottom]`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Word {
     pub text: String,
     pub rect: [f32; 4],
-    /// Which way the word reads inside `rect` (upright unless the engine says otherwise).
-    pub direction: WordDirection,
     /// How sure the engine is, 0–100, when it reports a confidence at all (`None`: the ocrs
     /// engine does not).
     pub confidence: Option<f32>,
@@ -175,13 +160,7 @@ pub struct Word {
 
 impl Word {
     pub fn new(text: impl Into<String>, rect: [f32; 4], source: &str) -> Word {
-        Word { text: text.into(), rect, direction: WordDirection::Across, confidence: None, source: source.into() }
-    }
-
-    /// Set the reading direction (builder style).
-    pub fn with_direction(mut self, direction: WordDirection) -> Word {
-        self.direction = direction;
-        self
+        Word { text: text.into(), rect, confidence: None, source: source.into() }
     }
 
     /// Set the confidence (builder style), clamped to the documented 0–100 scale (a negative
@@ -251,24 +230,17 @@ pub struct PlacedWord {
 
 impl PlacedWord {
     /// Place a pixel-space word with `to_user`, which maps an image pixel (x right, y down) to
-    /// user space. The word's [`WordDirection`] picks the corner its baseline starts at and
-    /// the edge it runs along, so a word read sideways stays sideways (#7254).
+    /// user space.
     pub fn place(word: &Word, to_user: impl Fn(f32, f32) -> [f64; 2]) -> PlacedWord {
         let [l, t, r, b] = word.rect;
-        // The baseline's start and end, and the top of the first letter, in pixels.
-        let (start, end, top) = match word.direction {
-            WordDirection::Across => ((l, b), (r, b), (l, t)),
-            WordDirection::Down => ((l, t), (l, b), (r, t)),
-            WordDirection::Up => ((r, b), (r, t), (l, b)),
-        };
-        let o = to_user(start.0, start.1);
-        let end = to_user(end.0, end.1);
-        let top = to_user(top.0, top.1);
+        let o = to_user(l, b);
+        let br = to_user(r, b);
+        let tl = to_user(l, t);
         PlacedWord {
             text: word.text.clone(),
             origin: o,
-            across: [end[0] - o[0], end[1] - o[1]],
-            up: [top[0] - o[0], top[1] - o[1]],
+            across: [br[0] - o[0], br[1] - o[1]],
+            up: [tl[0] - o[0], tl[1] - o[1]],
             confidence: word.confidence,
             source: word.source.clone(),
         }
