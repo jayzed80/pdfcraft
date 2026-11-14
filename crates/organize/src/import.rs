@@ -39,7 +39,7 @@ pub use combine::{
 };
 pub(crate) use copy::{Copier, copy_object};
 use copy::{MAX_COPY_DEPTH, SKIP_ON_PAGE};
-use fields::{add_kid, carry_form_fonts, field_and_widget, register_fields, resolve_field_conflicts, split_own_field};
+use fields::{add_kid, field_and_widget, register_fields, resolve_field_conflicts, split_own_field};
 pub use fields::{combine_field_conflicts, field_name_conflicts};
 
 /// How colliding fully-qualified field names are resolved when pages are imported.
@@ -345,8 +345,6 @@ fn import_pages_mapped(
         FieldConflicts::Merge => Vec::new(),
     };
     register_fields(dst, &copier.fields)?;
-    let fields = copier.fields.clone();
-    carry_form_fonts(dst, &mut copier, &fields)?;
     register_layers(dst, src, &copier.ocgs)?;
     let at = at.min(existing.len());
     let inserted: Vec<(ObjRef, Dict)> = new_pages.iter().map(|r| (*r, Dict::new())).collect();
