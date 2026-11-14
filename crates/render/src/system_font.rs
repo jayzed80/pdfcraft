@@ -204,7 +204,8 @@ fn pick_face(bytes: &[u8], probe: char, region: &[&str], bold: bool) -> Option<u
 
 /// List installed-font paths in preference order, with regional face-name hints for collections.
 /// Windows Simplified Chinese first tries the named document family; its generic list also
-/// prefers a bold face for bold requests. macOS includes bounded downloaded-font locations.
+/// prefers a bold face for bold requests. macOS includes bounded downloaded-font locations. Linux
+/// also finds those fixed names, and the Windows ones, anywhere in the font folders (bounded).
 /// Only fixed platform filenames are used: a PDF font name never becomes a filesystem path.
 fn candidates(script: Script, family: ChineseFamily, bold: bool) -> Vec<Candidate> {
     let region: &'static [&'static str] = match script {
@@ -265,9 +266,106 @@ fn candidates(script: Script, family: ChineseFamily, bold: bool) -> Vec<Candidat
                 "arphic-uming/uming.ttc",
             ],
         };
-        ["/usr/share/fonts", "/usr/local/share/fonts"].iter().flat_map(|dir| names.iter().map(move |f| Path::new(dir).join(f))).collect()
+        let fixed = ["/usr/share/fonts", "/usr/local/share/fonts"].iter().flat_map(|dir| names.iter().map(move |f| Path::new(dir).join(f)));
+        let mut files = unix_named(script, family, unix_installed());
+        files.extend(fixed);
+        files.extend(unix_found(names.iter().filter_map(|n| n.rsplit('/').next()), unix_installed()));
+        files.extend(unix_found(windows_names(script).iter().copied(), unix_installed()));
+        files
     };
     files.into_iter().map(|path| Candidate { path, region }).collect()
+}
+
+/// Windows file names of the faces a Chinese document family names, which Linux users often copy
+/// into a font folder (#7285). They come before the generic list, as on Windows.
+fn windows_family_names(script: Script, family: ChineseFamily) -> &'static [&'static str] {
+    match (script, family) {
+        (Script::SimplifiedChinese, ChineseFamily::Song) => &["simsun.ttc", "simsun.ttf"],
+        (Script::SimplifiedChinese, ChineseFamily::Hei) => &["simhei.ttf"],
+        (Script::SimplifiedChinese, ChineseFamily::Kai) => &["simkai.ttf"],
+        (Script::SimplifiedChinese, ChineseFamily::FangSong) => &["simfang.ttf"],
+        _ => &[],
+    }
+}
+
+/// Windows file names of a script's faces, tried on Linux after the distribution's own faces.
+fn windows_names(script: Script) -> &'static [&'static str] {
+    match script {
+        Script::Japanese => &["YuGothR.ttc", "meiryo.ttc", "msgothic.ttc"],
+        Script::SimplifiedChinese => &["msyh.ttc", "simsun.ttc", "simsun.ttf", "simhei.ttf", "simkai.ttf", "simfang.ttf", "msjh.ttc"],
+        Script::TraditionalChinese => &["msjh.ttc", "mingliu.ttc", "msyh.ttc"],
+        Script::Korean => &["malgun.ttf", "gulim.ttc"],
+    }
+}
+
+/// The installed files of the named Chinese family, found anywhere in the font folders.
+fn unix_named(script: Script, family: ChineseFamily, found: &HashMap<String, PathBuf>) -> Vec<PathBuf> {
+    unix_found(windows_family_names(script, family).iter().copied(), found)
+}
+
+/// The installed files with these names (compared without case), in the order given.
+fn unix_found<'a>(names: impl Iterator<Item = &'a str>, found: &HashMap<String, PathBuf>) -> Vec<PathBuf> {
+    names.filter_map(|n| found.get(&n.to_lowercase()).cloned()).collect()
+}
+
+/// Folders and entries looked at when searching the Unix font folders: they can be large, and a
+/// symbolic link can loop back on a folder, so both the depth and the total are bounded.
+const MAX_SCAN_DEPTH: u32 = 6;
+const MAX_SCAN_ENTRIES: usize = 50_000;
+
+/// The font files in the Unix font folders, searched once: lower-cased file name to path.
+fn unix_installed() -> &'static HashMap<String, PathBuf> {
+    static FOUND: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
+    FOUND.get_or_init(|| scan_font_dirs(&unix_font_dirs()))
+}
+
+/// The folders fontconfig's default configuration reads: the system and local ones, and the
+/// user's (`$XDG_DATA_HOME/fonts`, else `~/.local/share/fonts`, and `~/.fonts`). Users install
+/// fonts by hand into any of them, often in a subfolder of their own (#7285).
+fn unix_font_dirs() -> Vec<PathBuf> {
+    let absolute = |v: std::ffi::OsString| Some(PathBuf::from(v)).filter(|p| p.is_absolute());
+    let home = std::env::var_os("HOME").and_then(absolute);
+    let data = std::env::var_os("XDG_DATA_HOME").and_then(absolute).or_else(|| home.as_ref().map(|h| h.join(".local/share")));
+    let mut dirs = vec![PathBuf::from("/usr/share/fonts"), PathBuf::from("/usr/local/share/fonts")];
+    dirs.extend(data.map(|d| d.join("fonts")));
+    dirs.extend(home.map(|h| h.join(".fonts")));
+    dirs
+}
+
+/// Every `.ttf` and `.ttc` file under `roots`, by lower-cased file name. The first one found wins:
+/// roots in order, and each folder's entries sorted, so the choice doesn't depend on disk order.
+fn scan_font_dirs(roots: &[PathBuf]) -> HashMap<String, PathBuf> {
+    /// Add the font files of `dir` and its subfolders down to `depth` more levels.
+    fn walk(dir: &Path, depth: u32, budget: &mut usize, found: &mut HashMap<String, PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let mut paths = Vec::new();
+        for entry in entries.flatten() {
+            if *budget == 0 {
+                break;
+            }
+            *budget -= 1;
+            paths.push(entry.path());
+        }
+        paths.sort();
+        for path in paths {
+            if path.is_dir() {
+                if depth > 0 {
+                    walk(&path, depth - 1, budget, found);
+                }
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_lowercase) else { continue };
+            if name.ends_with(".ttf") || name.ends_with(".ttc") {
+                found.entry(name).or_insert(path);
+            }
+        }
+    }
+    let mut found = HashMap::new();
+    let mut budget = MAX_SCAN_ENTRIES;
+    for root in roots {
+        walk(root, MAX_SCAN_DEPTH, &mut budget, &mut found);
+    }
+    found
 }
 
 /// The `AssetData` folders of the downloaded font assets of macOS, found once. The ids in their
@@ -407,7 +505,7 @@ mod tests {
             assert!(!list.is_empty(), "{script:?}");
             for c in list {
                 assert!(c.path.is_absolute(), "{}", c.path.display());
-                assert!(c.path.extension().is_some_and(|e| e == "ttf" || e == "ttc"), "{}", c.path.display());
+                assert!(c.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("ttc")), "{}", c.path.display());
                 let name = c.path.to_string_lossy().to_lowercase();
                 assert!(
                     !["notosanscjk", "notoserifcjk", "sourcehan", "source-han", "adobe", "kozuka", "minion"].iter().any(|b| name.contains(b)),
@@ -415,6 +513,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// SimSun, SimHei and KaiTi copied by hand into a subfolder of a font folder, with whatever
+    /// case their names have, are found and come first for the families a GBK invoice names;
+    /// before #7285 only a few fixed distribution paths were tried, so the text drew as boxes.
+    #[test]
+    fn hand_installed_chinese_families_are_found_in_font_subfolders() {
+        let root = std::env::temp_dir().join(format!("pdfcraft-7285-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let file = |rel: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"font").unwrap();
+            path
+        };
+        let simsun = file("local/windows/SimSun.ttc");
+        let simhei = file("local/windows/SIMHEI.TTF");
+        let simkai = file("user/zh/simkai.ttf");
+        let wqy = file("local/wqy/wqy-zenhei.ttc");
+        file("local/readme.txt");
+        // Below the depth bound: not looked at.
+        file(&format!("user/{}/simfang.ttf", ["d"; MAX_SCAN_DEPTH as usize + 1].join("/")));
+        let found = scan_font_dirs(&[root.join("local"), root.join("user"), root.join("missing")]);
+        let _ = std::fs::remove_dir_all(&root);
+
+        let gb = Script::SimplifiedChinese;
+        assert_eq!(unix_named(gb, ChineseFamily::Song, &found), std::slice::from_ref(&simsun));
+        assert_eq!(unix_named(gb, ChineseFamily::Hei, &found), [simhei]);
+        assert_eq!(unix_named(gb, ChineseFamily::Kai, &found), [simkai]);
+        assert!(unix_named(gb, ChineseFamily::FangSong, &found).is_empty(), "too deep");
+        assert!(unix_named(gb, ChineseFamily::Default, &found).is_empty());
+        assert_eq!(unix_found(["wqy-zenhei.ttc"].into_iter(), &found), [wqy]);
+        assert!(unix_found(windows_names(gb).iter().copied(), &found).contains(&simsun));
+        assert!(!found.contains_key("readme.txt"));
     }
 
     /// The four regional Adobe collections select their corresponding scripts; Identity
