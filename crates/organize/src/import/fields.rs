@@ -1,5 +1,5 @@
 use super::copy::WIDGET_KEYS;
-use super::{Dict, Document, HashMap, HashSet, ObjRef, Object, OrganizeError, walk};
+use super::{Copier, Dict, Document, HashMap, HashSet, ObjRef, Object, OrganizeError, walk};
 
 /// Rename the top-level fields about to be registered in `dst` whose fully-qualified names
 /// (`parent.T.child`) are already taken, so each imported field stays its own field instead of
@@ -305,6 +305,211 @@ pub(super) fn register_fields(dst: &mut Document, fields: &[ObjRef]) -> Result<(
     Ok(())
 }
 
+/// PdfCraft patch (#7279): bring the fonts the imported fields' default appearances (`/DA`) name
+/// from the source form's `/DR` into the destination's, so editing a value redraws it in the
+/// field's own font rather than in whatever the destination calls by that name (or Helvetica).
+/// A name the destination already gives to another font is renamed to the first free `Name_1`,
+/// `Name_2`… and the `/DA` follows. A top-level field that took its `/DA` from the source form
+/// gets it written on itself, since the destination form's may differ. Call after
+/// [`register_fields`], so the destination has a form.
+pub(super) fn carry_form_fonts(dst: &mut Document, copier: &mut Copier<'_>, roots: &[ObjRef]) -> Result<(), OrganizeError> {
+    if roots.is_empty() {
+        return Ok(());
+    }
+    let src = copier.src;
+    let src_form = form_of(src);
+    let src_fonts = src_form.as_ref().and_then(|f| fonts_of(src, f)).unwrap_or_default();
+    let src_da = src_form.as_ref().and_then(|f| da_of(src, f));
+    let dst_da = form_of(dst).and_then(|f| da_of(dst, &f));
+    let mut fonts = form_of(dst).and_then(|f| fonts_of(dst, &f)).unwrap_or_default();
+    let mut fonts_changed = false;
+    // Source font name → its name in the destination (`None`: the source form has no such font).
+    let mut names: HashMap<Vec<u8>, Option<Vec<u8>>> = HashMap::new();
+    let is_root: HashSet<ObjRef> = roots.iter().copied().collect();
+    let mut nodes = Vec::new();
+    let mut seen = HashSet::new();
+    for &root in roots {
+        field_nodes(dst, root, 0, &mut seen, &mut nodes);
+    }
+    for node in nodes {
+        #[cfg(test)]
+        crate::work(1);
+        let Some(d) = dst.get(node).as_dict().cloned() else { continue };
+        let (da, inherited) = match da_of(dst, &d) {
+            Some(da) => (da, false),
+            None if is_root.contains(&node) => match &src_da {
+                Some(da) => (da.clone(), true),
+                None => continue,
+            },
+            None => continue,
+        };
+        let mut new_da = da.clone();
+        if let Some((at, name)) = da_font(&da) {
+            let target = match names.get(&name) {
+                Some(t) => t.clone(),
+                None => {
+                    let t = place_font(dst, copier, &src_fonts, &mut fonts, &name, &mut fonts_changed)?;
+                    names.insert(name.clone(), t.clone());
+                    t
+                }
+            };
+            if let Some(t) = target.filter(|t| *t != name) {
+                new_da.splice(at, t);
+            }
+        }
+        if new_da != da || (inherited && dst_da.as_ref() != Some(&new_da)) {
+            dst.update_dict(node, |f| f.set(b"DA".to_vec(), Object::String(pdfcraft_cos::PdfString::literal(new_da))))?;
+        }
+    }
+    if fonts_changed {
+        set_form_fonts(dst, fonts)?;
+    }
+    Ok(())
+}
+
+/// The destination name for the source form's font `name`, copying the font into `fonts` when
+/// the destination lacks it: `name` itself when free or already the same font, else the first
+/// free `name_N`. `None` when the source form has no font of that name (nothing to bring).
+fn place_font(
+    dst: &mut Document,
+    copier: &mut Copier<'_>,
+    src_fonts: &Dict,
+    fonts: &mut Dict,
+    name: &[u8],
+    changed: &mut bool,
+) -> Result<Option<Vec<u8>>, OrganizeError> {
+    let Some(entry) = src_fonts.get(name).cloned() else { return Ok(None) };
+    let mut budget = SAME_FONT_BUDGET;
+    if let Some(theirs) = fonts.get(name)
+        && same_object(dst, theirs, copier.src, &entry, 0, &mut budget)
+    {
+        return Ok(Some(name.to_vec()));
+    }
+    let mut target = name.to_vec();
+    let mut n = 0u32;
+    while fonts.contains(&target) {
+        n = n.saturating_add(1);
+        target = [name, b"_", n.to_string().as_bytes()].concat();
+    }
+    let copied = copier.copy_value(dst, &entry, None)?;
+    fonts.set(target.clone(), copied);
+    *changed = true;
+    Ok(Some(target))
+}
+
+/// How many objects [`same_object`] compares before calling two fonts different.
+const SAME_FONT_BUDGET: usize = 4096;
+
+/// Whether `a` (of `a_doc`) and `b` (of `b_doc`) are the same value, following references on
+/// both sides. Bounded in depth and in work; past either, they count as different.
+fn same_object(a_doc: &Document, a: &Object, b_doc: &Document, b: &Object, depth: u8, budget: &mut usize) -> bool {
+    if depth > 16 || *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    let (a, b) = (a_doc.resolve(a), b_doc.resolve(b));
+    let same_dict = |x: &Dict, y: &Dict, budget: &mut usize| {
+        x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same_object(a_doc, v, b_doc, w, depth + 1, budget)))
+    };
+    match (a.as_ref(), b.as_ref()) {
+        (Object::Dict(x), Object::Dict(y)) => same_dict(x, y, budget),
+        (Object::Stream(x), Object::Stream(y)) => x.raw == y.raw && same_dict(&x.dict, &y.dict, budget),
+        (Object::Array(x), Object::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(v, w)| same_object(a_doc, v, b_doc, w, depth + 1, budget))
+        }
+        (Object::Ref(_), _) | (_, Object::Ref(_)) => false,
+        (x, y) => x == y,
+    }
+}
+
+/// Every node of the field tree under `node` (kids before their own kids), each once.
+fn field_nodes(doc: &Document, node: ObjRef, depth: u8, seen: &mut HashSet<ObjRef>, out: &mut Vec<ObjRef>) {
+    if depth > 32 || !seen.insert(node) {
+        return;
+    }
+    out.push(node);
+    let Some(d) = doc.get(node).as_dict().cloned() else { return };
+    let kids = d.get(b"Kids").map(|k| doc.resolve(k)).and_then(|k| k.as_array().cloned()).unwrap_or_default();
+    for kid in kids.iter().filter_map(|k| k.as_ref()) {
+        field_nodes(doc, kid, depth + 1, seen, out);
+    }
+}
+
+/// The document's `/AcroForm` dictionary.
+fn form_of(doc: &Document) -> Option<Dict> {
+    let catalog = doc.get(doc.root()?).as_dict().cloned()?;
+    doc.resolve(catalog.get(b"AcroForm")?).as_dict().cloned()
+}
+
+/// A form's `/DR /Font` dictionary.
+fn fonts_of(doc: &Document, form: &Dict) -> Option<Dict> {
+    let dr = doc.resolve(form.get(b"DR")?).as_dict().cloned()?;
+    doc.resolve(dr.get(b"Font")?).as_dict().cloned()
+}
+
+/// A dictionary's `/DA` string, as stored.
+fn da_of(doc: &Document, d: &Dict) -> Option<Vec<u8>> {
+    d.get(b"DA").and_then(|o| doc.resolve(o).as_string().map(|s| s.bytes.clone()))
+}
+
+/// The font a `/DA` sets, as the appearance reads it (the name two tokens before the last
+/// `Tf`): where its name starts in `da` (after the `/`) and the name.
+fn da_font(da: &[u8]) -> Option<(std::ops::Range<usize>, Vec<u8>)> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    for (i, b) in da.iter().enumerate().chain(std::iter::once((da.len(), &b' '))) {
+        match (b.is_ascii_whitespace(), start) {
+            (true, Some(s)) => {
+                tokens.push(s..i);
+                start = None;
+            }
+            (false, None) => start = Some(i),
+            _ => {}
+        }
+    }
+    let tf = tokens.iter().rposition(|t| da.get(t.clone()) == Some(b"Tf".as_slice()))?;
+    let name = tokens.get(tf.checked_sub(2)?)?.clone();
+    if da.get(name.start) != Some(&b'/') {
+        return None;
+    }
+    let name = name.start + 1..name.end;
+    let bytes = da.get(name.clone())?.to_vec();
+    Some((name, bytes))
+}
+
+/// Replace the destination form's `/DR /Font` with `fonts`, wherever the form keeps it
+/// (`/DR` and `/Font` may each be direct or indirect).
+fn set_form_fonts(dst: &mut Document, fonts: Dict) -> Result<(), OrganizeError> {
+    let root = dst.root().ok_or(OrganizeError::NoPageTree)?;
+    let catalog = dst.get(root).as_dict().cloned().ok_or(OrganizeError::NoPageTree)?;
+    let (form_ref, mut form) = match catalog.get(b"AcroForm") {
+        Some(Object::Ref(r)) => (Some(*r), dst.get(*r).as_dict().cloned().unwrap_or_default()),
+        Some(Object::Dict(d)) => (None, d.clone()),
+        _ => (None, Dict::new()),
+    };
+    let put = |dst: &mut Document, dr: &mut Dict, fonts: Dict| match dr.get(b"Font") {
+        Some(Object::Ref(r)) => dst.set(*r, Object::Dict(fonts)),
+        _ => dr.set(b"Font".to_vec(), Object::Dict(fonts)),
+    };
+    if let Some(Object::Ref(dr_ref)) = form.get(b"DR").cloned() {
+        let mut dr = dst.get(dr_ref).as_dict().cloned().unwrap_or_default();
+        put(dst, &mut dr, fonts);
+        dst.set(dr_ref, Object::Dict(dr));
+        return Ok(());
+    }
+    let mut dr = form.get(b"DR").and_then(|d| d.as_dict().cloned()).unwrap_or_default();
+    put(dst, &mut dr, fonts);
+    form.set(b"DR".to_vec(), Object::Dict(dr));
+    match form_ref {
+        Some(r) => dst.set(r, Object::Dict(form)),
+        None => {
+            let r = dst.add(form);
+            dst.update_dict(root, |c| c.set(b"AcroForm".to_vec(), Object::Ref(r)))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -344,6 +549,72 @@ mod tests {
         ]);
         // Only "item" collides with dst; "item-1" in src is already unique and must not be stolen.
         assert_eq!(field_name_conflicts(&dst, &src), [("item".to_string(), "item-2".to_string())]);
+    }
+
+    /// A one-page form with a text field `field` in the `face` font named `alias` in its `/DR`;
+    /// the field's own `/DA` is `field_da` (`""`: it takes the form's).
+    fn font_form(face: &str, field: &str, alias: &str, field_da: &str) -> Document {
+        build(&[
+            &format!(
+                "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] /DR << /Font << /{alias} 4 0 R >> >> /DA (/{alias} 12 Tf 0 g) >> >>"
+            ),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 100 100] >>",
+            "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>",
+            &format!("<< /Type /Font /Subtype /Type1 /BaseFont /{face} >>"),
+            &format!("<< /Type /Annot /Subtype /Widget /FT /Tx /T ({field}) {field_da} /Rect [0 0 10 10] /P 3 0 R >>"),
+        ])
+    }
+
+    /// The `/DA` of field `name` (its own, or else its parent's) and the base font its font name
+    /// has in the form's `/DR`, plus how many fonts the `/DR` lists.
+    fn field_font(doc: &Document, name: &str) -> (String, Option<String>, usize) {
+        let form = form_of(doc).expect("form");
+        let fonts = fonts_of(doc, &form).expect("fonts");
+        for n in doc.object_numbers() {
+            let Some(d) = doc.get(ObjRef::new(n, doc.generation(n))).as_dict().cloned() else { continue };
+            if d.get(b"T").and_then(|t| doc.resolve(t).as_string().map(|s| s.to_text())).as_deref() != Some(name) {
+                continue;
+            }
+            let da = da_of(doc, &d).expect("the field has a /DA");
+            let (_, font) = da_font(&da).expect("the /DA sets a font");
+            let base = fonts
+                .get(&font)
+                .and_then(|f| doc.resolve(f).as_dict().and_then(|f| f.name(b"BaseFont")).map(|b| String::from_utf8_lossy(b).into_owned()));
+            return (String::from_utf8_lossy(&da).into_owned(), base, fonts.len());
+        }
+        panic!("no field {name}");
+    }
+
+    #[test]
+    fn an_imported_field_brings_its_form_font() {
+        let src = font_form("Courier", "imported", "F1", "/DA (/F1 12 Tf 0 g)");
+        // The name is taken by another font: the imported one is renamed, and its /DA follows.
+        let mut dst = font_form("Helvetica", "destination", "F1", "/DA (/F1 12 Tf 0 g)");
+        crate::import::import_pages_with(&mut dst, &src, &[0], 1, crate::import::FieldConflicts::Rename).expect("imports");
+        assert_eq!(field_font(&dst, "imported"), ("/F1_1 12 Tf 0 g".into(), Some("Courier".into()), 2));
+        assert_eq!(field_font(&dst, "destination"), ("/F1 12 Tf 0 g".into(), Some("Helvetica".into()), 2));
+        // The same font under the same name is neither copied again nor renamed (Duplicate).
+        let mut dst = font_form("Courier", "destination", "F1", "/DA (/F1 12 Tf 0 g)");
+        crate::import::import_pages_with(&mut dst, &src, &[0], 1, crate::import::FieldConflicts::Rename).expect("imports");
+        assert_eq!(field_font(&dst, "imported"), ("/F1 12 Tf 0 g".into(), Some("Courier".into()), 1));
+    }
+
+    #[test]
+    fn an_imported_field_keeps_the_default_appearance_of_its_form() {
+        // The field has no /DA of its own: it took its source form's, which the copy now carries.
+        let src = font_form("Courier", "imported", "F2", "");
+        let mut dst = font_form("Helvetica", "destination", "F1", "/DA (/F1 12 Tf 0 g)");
+        crate::import::import_pages_with(&mut dst, &src, &[0], 1, crate::import::FieldConflicts::Rename).expect("imports");
+        assert_eq!(field_font(&dst, "imported"), ("/F2 12 Tf 0 g".into(), Some("Courier".into()), 2));
+    }
+
+    #[test]
+    fn da_font_finds_the_name_the_last_tf_sets() {
+        assert_eq!(da_font(b"/F1 12 Tf 0 g"), Some((1..3, b"F1".to_vec())));
+        assert_eq!(da_font(b"0 g /A 9 Tf\n/Cour 0 Tf"), Some((13..17, b"Cour".to_vec())));
+        assert_eq!(da_font(b"12 Tf 0 g"), None);
+        assert_eq!(da_font(b"F1 12 Tf"), None);
+        assert_eq!(da_font(b""), None);
     }
 
     #[test]
