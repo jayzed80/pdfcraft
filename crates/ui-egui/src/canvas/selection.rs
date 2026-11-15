@@ -177,8 +177,33 @@ enum SelectionAction {
     Copy,
 }
 
-/// The selection bar's width before it has been laid out once (English labels).
-const SELECTION_BAR_GUESS: f32 = 520.0;
+use crate::icons;
+use comments::CommentTool;
+
+/// The selection bar's width before it has been laid out once (5 icon buttons + "Replace text").
+const SELECTION_BAR_GUESS: f32 = 280.0;
+const SELECTION_BAR_ABOVE: f32 = 44.0;
+const SELECTION_BAR_GAP: f32 = 6.0;
+const SELECTION_BAR_MARGIN: f32 = 8.0;
+
+/// Position of the text selection action bar inside `viewport`: above the first selected line
+/// when there is room, and below the selection otherwise.
+fn selection_bar_pos(viewport: Rect, first: Rect, last: Rect, width: f32) -> Pos2 {
+    let fits_above = first.top() - SELECTION_BAR_ABOVE >= viewport.top() + SELECTION_BAR_GAP;
+    let (anchor, y) = if fits_above {
+        (first, first.top() - SELECTION_BAR_ABOVE)
+    } else {
+        let y = if last.bottom() + 48.0 < viewport.bottom() {
+            last.bottom() + SELECTION_BAR_GAP
+        } else {
+            (viewport.bottom() - SELECTION_BAR_ABOVE).max(viewport.top() + SELECTION_BAR_GAP)
+        };
+        (last, y)
+    };
+    let max_x = (viewport.right() - width - SELECTION_BAR_MARGIN).max(viewport.left() + SELECTION_BAR_MARGIN);
+    let x = anchor.left().clamp(viewport.left() + SELECTION_BAR_MARGIN, max_x);
+    pos2(x, y)
+}
 
 /// Actions on an existing text selection, next to the selected words.
 pub(super) fn selection_actions(
@@ -202,37 +227,40 @@ pub(super) fn selection_actions(
     }
     let Some(text) = view.texts.get(&selection.page) else { return false };
     let Some(xf) = view.page_xform(selection.page) else { return false };
-    let Some(last) = selection.rects(text).last().copied() else { return false };
+    let rects = selection.rects(text);
+    let (Some(&first), Some(&last)) = (rects.first(), rects.last()) else { return false };
     let selected = selection.text(text);
     if selected.is_empty() {
         return false;
     }
-    let rect = xf.view_rect(last);
-    if !viewport.intersects(rect) {
+    let first_rect = xf.view_rect(first);
+    let last_rect = xf.view_rect(last);
+    if !rects.iter().any(|&r| viewport.intersects(xf.view_rect(r))) {
         return false;
     }
     let id = egui::Id::unique(("text-selection-actions", view.view_key()));
-    // The bar stays inside the pages' area, by the width it had last frame (its labels make it
-    // wider in some languages), so it never covers a side panel; a first guess before it has one.
+    // The bar stays inside the pages' area, by the width it had last frame, so it never covers a
+    // side panel; a first guess before it has one.
     let width = egui::AreaState::load(ui.ctx(), id).and_then(|a| a.size).map_or(SELECTION_BAR_GUESS, |s| s.x);
-    let x = rect.left().clamp(viewport.left() + 8.0, (viewport.right() - width - 8.0).max(viewport.left() + 8.0));
-    let y = if rect.bottom() + 48.0 < viewport.bottom() { rect.bottom() + 6.0 } else { (rect.top() - 44.0).max(viewport.top() + 6.0) };
+    let pos = selection_bar_pos(viewport, first_rect, last_rect, width);
     let mut chosen = None;
-    egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(pos2(x, y)).show(ui.ctx(), |ui| {
+    egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
-                for (label, action) in [
-                    (tl!("Add comment"), SelectionAction::Note),
-                    (tl!("Highlight"), SelectionAction::Markup(comments::CommentTool::Highlight)),
-                    (tl!("Underline"), SelectionAction::Markup(comments::CommentTool::Underline)),
-                    (tl!("Strikethrough"), SelectionAction::Markup(comments::CommentTool::StrikeOut)),
-                    (tl!("Replace text"), SelectionAction::Replace),
+                for (icon, tip, action) in [
+                    (CommentTool::Note.icon(), tl!("Add comment"), SelectionAction::Note),
+                    (CommentTool::Highlight.icon(), tl!("Highlight"), SelectionAction::Markup(CommentTool::Highlight)),
+                    (CommentTool::Underline.icon(), tl!("Underline"), SelectionAction::Markup(CommentTool::Underline)),
+                    (CommentTool::StrikeOut.icon(), tl!("Strikethrough"), SelectionAction::Markup(CommentTool::StrikeOut)),
                 ] {
-                    if ui.add_enabled(can_comment, egui::Button::new(label)).clicked() {
+                    if ui.add_enabled_ui(can_comment, |ui| icons::button(ui, icon, 26.0, false, tip)).inner.clicked() {
                         chosen = Some(action);
                     }
                 }
-                if ui.add_enabled(can_copy, egui::Button::new(tl!("Copy"))).clicked() {
+                if ui.add_enabled(can_comment, egui::Button::new(tl!("Replace text"))).clicked() {
+                    chosen = Some(SelectionAction::Replace);
+                }
+                if ui.add_enabled_ui(can_copy, |ui| icons::button(ui, "copy", 26.0, false, tl!("Copy"))).inner.clicked() {
                     chosen = Some(SelectionAction::Copy);
                 }
             });
@@ -273,4 +301,82 @@ pub(super) fn selection_actions(
         SelectionAction::Copy => {}
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{DocId, PageXform, ViewDefaults};
+    use super::*;
+    use egui::vec2;
+    use pdfcraft_render::{PageInfo, TextGlyph};
+
+    fn test_doc_info() -> DocInfo {
+        DocInfo {
+            pages: vec![PageInfo { width: 600.0, height: 800.0, label: "1".into(), crop: [0.0, 0.0, 600.0, 800.0], rotation: 0 }],
+            ..DocInfo::default()
+        }
+    }
+
+    fn two_line_page_text(first_y: f32, second_y: f32) -> PageText {
+        let glyph = |c: char, y: f32| TextGlyph {
+            text: c.into(),
+            rect: [50.0, y, 200.0, y + 20.0],
+            quad: [[50.0, y], [200.0, y], [200.0, y + 20.0], [50.0, y + 20.0]],
+            direction: [1.0, 0.0],
+        };
+        PageText { glyphs: vec![glyph('a', first_y), glyph('b', second_y)], line_of: vec![0, 1], space_before: vec![false, false], truncated: false }
+    }
+
+    fn run_selection_bar(viewport: Rect, first_y: f32, second_y: f32) -> egui::AreaState {
+        let info = test_doc_info();
+        let mut view = DocView::new(DocId(1), &info, ViewDefaults::default());
+        view.screen_xforms = vec![(0, PageXform { rect: Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 800.0)), rot: 0, pw: 600.0, ph: 800.0 })];
+        view.texts.insert(0, Arc::new(two_line_page_text(first_y, second_y)));
+        view.select_text(0, 0, 1);
+
+        let ctx = egui::Context::default();
+        let prefs = comments::CommentPrefs::default();
+        let id = egui::Id::unique(("text-selection-actions", view.view_key()));
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                selection_actions(ui, viewport, &mut view, &info, &prefs, true, true);
+            });
+            out.textures_delta.clear();
+        }
+        egui::AreaState::load(&ctx, id).expect("selection bar area should be laid out")
+    }
+
+    #[test]
+    fn selection_bar_opens_above_first_line_with_compact_icons() {
+        let viewport = Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 800.0));
+
+        // Room above the first selected line: bar must open above line 0, not below line 1.
+        let above = run_selection_bar(viewport, 120.0, 150.0);
+        let pos = above.pivot_pos.expect("bar has a position");
+        assert!(pos.y < 120.0, "expected bar above first line (y < 120.0), got y = {}", pos.y);
+
+        // Compact icon buttons + "Replace text" should be much narrower than 6 full text buttons.
+        let size = above.size.expect("bar has a size");
+        assert!(size.x < 320.0, "expected compact icon bar (< 320 px), got width = {}", size.x);
+
+        // No room above the first selected line: bar must fall back below the selection.
+        let below = run_selection_bar(viewport, 10.0, 40.0);
+        let below_pos = below.pivot_pos.expect("bar has a position");
+        assert!(below_pos.y >= 60.0, "expected bar below selection (y >= 60.0), got y = {}", below_pos.y);
+    }
+
+    #[test]
+    fn selection_bar_pos_prefers_above_and_clamps_horizontally() {
+        let viewport = Rect::from_min_size(pos2(100.0, 50.0), vec2(500.0, 600.0));
+        let first = Rect::from_min_size(pos2(550.0, 200.0), vec2(120.0, 20.0));
+        let last = Rect::from_min_size(pos2(120.0, 230.0), vec2(120.0, 20.0));
+        let pos = selection_bar_pos(viewport, first, last, 260.0);
+        assert_eq!(pos, pos2(600.0 - 260.0 - 8.0, 200.0 - 44.0));
+
+        // Too close to the top of the viewport: falls back below the last line.
+        let top_first = Rect::from_min_size(pos2(80.0, 60.0), vec2(120.0, 20.0));
+        let top_last = Rect::from_min_size(pos2(120.0, 90.0), vec2(120.0, 20.0));
+        let below = selection_bar_pos(viewport, top_first, top_last, 260.0);
+        assert_eq!(below, pos2(120.0, 110.0 + 6.0));
+    }
 }
