@@ -5,14 +5,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
-use pdfcraft_fonts::literal;
+use pdfcraft_fonts::{literal, win_ansi};
 
 use crate::XfaError;
 use crate::layout::{Action, BorderShape, Form, Item, Page, Rounded, Turned, Widget, WidgetKind};
 use crate::model::Rect;
 use crate::text::{Face, Family, Span};
-use encoding::FaceEncoding;
-use pdfcraft_fonts::Std14;
 
 mod common;
 mod encoding;
@@ -714,6 +712,7 @@ impl Emitter<'_> {
     /// in its text as annotations. Returns the page object.
     fn page(&mut self, page: &Page, pages_ref: ObjRef) -> Result<ObjRef, XfaError> {
         let page_ref = self.doc.add(Object::Dict(Dict::new()));
+        let mut fonts: BTreeMap<&'static str, &'static str> = BTreeMap::new();
         let mut content: Vec<u8> = Vec::new();
         let mut xobjects = Dict::new();
         let mut annots = Vec::new();
@@ -724,7 +723,6 @@ impl Emitter<'_> {
         // The link the text before ended in, which a next piece of it on the line widens.
         let mut last_link: Option<LinkPiece> = None;
         let steps = steps(&page.items);
-        let fonts = page_fonts(&steps);
         let mut turn = None;
         for (i, step) in steps.iter().enumerate() {
             let item = match step {
@@ -804,9 +802,7 @@ impl Emitter<'_> {
                 Item::Text(s) => {
                     // The form's own text, set in the standard fonts: what they can't draw is
                     // shown as `?` and reported once (the layout goes on), never silently.
-                    let name = s.face.resource_name();
-                    let encoding = fonts.get(name).map(|(_, e)| e);
-                    if let Some(c) = encoding.map_or_else(|| pdfcraft_fonts::first_undrawable(&s.text), |e| e.first_undrawable(&s.text)) {
+                    if let Some(c) = pdfcraft_fonts::first_undrawable(&s.text) {
                         const PREFIX: &str = "some of the form's text has characters the standard fonts can't draw";
                         if !self.warnings.iter().any(|w| w.starts_with(PREFIX)) {
                             self.warnings.push(format!(
@@ -815,6 +811,8 @@ impl Emitter<'_> {
                                 u32::from(c)
                             ));
                         }
+                    let name = s.face.resource_name();
+                    fonts.insert(name, s.face.family.base_font(s.face.bold, s.face.italic));
                     }
                     // Horizontal scaling is text state, which outlives the text object: a
                     // condensed span gets a graphics state of its own, so the next isn't.
@@ -825,7 +823,7 @@ impl Emitter<'_> {
                         format!("{open} /{name} {} Tf {} rg{tz} 1 0 0 1 {} {} Tm ", n(s.face.size), rgb(s.face.color), n(s.x), n(h - s.baseline))
                             .bytes(),
                     );
-                    content.extend(literal(&encoding.map_or_else(|| pdfcraft_fonts::win_ansi(&s.text), |e| e.encode(&s.text))));
+                    content.extend(literal(&win_ansi(&s.text)));
                     content.extend_from_slice(format!(" Tj{close}\n").as_bytes());
                     if let Some(r) = self.text_link(s, h, page_ref, &mut last_link, turn)? {
                         // A link works only where its text shows: one in print-only text is
@@ -858,8 +856,8 @@ impl Emitter<'_> {
             content.extend_from_slice(b"EMC\n");
         }
         let mut font_dict = Dict::new();
-        for (name, (font, encoding)) in &fonts {
-            font_dict.set(name.as_bytes().to_vec(), encoding.font(*font));
+        for (name, base) in fonts {
+            font_dict.set(name.as_bytes().to_vec(), standard_font(base));
         }
         let mut res = Dict::new();
         res.set(b"Font".to_vec(), Object::Dict(font_dict));
@@ -995,19 +993,6 @@ fn write_button_action(action: Option<&Action>, d: &mut Dict) {
         }
         None => {}
     }
-}
-
-/// The standard font of each resource name a page's text is written in, with its encoding there,
-/// made from all the text the font draws on the page.
-fn page_fonts(steps: &[Step<'_>]) -> BTreeMap<&'static str, (Std14, FaceEncoding)> {
-    let mut texts: BTreeMap<&'static str, (Std14, Vec<&str>)> = BTreeMap::new();
-    for item in steps.iter().filter_map(Step::item).map(bare) {
-        if let Item::Text(s) = item {
-            let font = s.face.family.std14(s.face.bold, s.face.italic);
-            texts.entry(s.face.resource_name()).or_insert_with(|| (font, Vec::new())).1.push(&s.text);
-        }
-    }
-    texts.into_iter().map(|(name, (font, texts))| (name, (font, FaceEncoding::of(texts)))).collect()
 }
 
 /// `item`, or what it holds when it is shown only on screen or only in print ([`Item::Only`]).
