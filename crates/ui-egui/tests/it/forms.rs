@@ -1191,6 +1191,27 @@ fn refused_value_stops_save(commit_key: egui::Key, case: &str) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// #7677: a multi-line field whose value breaks its lines with CR, as Acrobat writes them, and
+/// with CRLF, opens for editing with those breaks and its empty line, not run together.
+#[test]
+fn a_multi_line_fields_line_breaks_stay_when_it_is_opened_for_editing() {
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] /DA (/Helv 10 Tf 0 g) /DR << /Font << /Helv 5 0 R >> >> >> >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 400] >>",
+        "<< /Type /Page /Parent 2 0 R /Annots [4 0 R] >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /Ff 4096 /T (notes) /V (First\\r\\rThird\\r\\nFourth) /Rect [20 200 280 360] /P 3 0 R /F 4 >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    ];
+    let mut h = harness_with_bytes("notes.pdf", pdf_from_objects(&objs));
+    assert_eq!(value(&h, "notes"), ["First\r\rThird\r\nFourth"]);
+    click_field(&mut h, "notes", 0);
+    assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.text.as_str()), Some("First\n\nThird\nFourth"));
+    // Leaving without typing changes nothing.
+    click_at(&mut h, egui::pos2(5.0, 890.0));
+    assert!(h.state().views[0].forms.focus.is_none(), "the editor closed");
+    assert_eq!(value(&h, "notes"), ["First\r\rThird\r\nFourth"]);
+}
+
 #[test]
 fn flattening_while_typing_flattens_the_typed_text() {
     let mut h = harness();

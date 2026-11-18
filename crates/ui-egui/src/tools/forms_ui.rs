@@ -323,6 +323,12 @@ pub(crate) fn draft_text(f: &FormField) -> String {
     {
         return shown.clone();
     }
+    // A multi-line field's lines may end in CR (as Acrobat writes them) or CRLF, and its
+    // appearance breaks at each; the editor breaks only at LF, so it would run them together
+    // (#7677). A CRLF pair is one break, as in `pdfcraft_fonts::wrap`.
+    if f.kind == FormFieldKind::Text && f.has(field_flags::MULTILINE) && value.contains('\r') {
+        return value.replace("\r\n", "\n").replace('\r', "\n");
+    }
     value
 }
 
@@ -672,7 +678,9 @@ pub(crate) fn draft_edit(focus: &Focus, form: &[FormField]) -> Option<Edit> {
         return None;
     }
     let value = match f.kind {
-        FormFieldKind::Text if f.value.first().map(String::as_str).unwrap_or("") != focus.text => FieldValue::Text(focus.text.clone()),
+        // Against the editor's own text, so opening a field whose line breaks the editor
+        // rewrites (CR to LF) and leaving it untouched changes nothing.
+        FormFieldKind::Text if draft_text(f) != focus.text => FieldValue::Text(focus.text.clone()),
         // Typed into an editable combo box: a shown text picks its option, anything else is the
         // value itself (the engine maps it, and refuses free text when Edit is clear).
         FormFieldKind::Combo if editable_combo(f) && focus.text != draft_text(f) && f.value.first() != Some(&focus.text) => {
