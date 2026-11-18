@@ -630,6 +630,79 @@ fn form_text_the_standard_fonts_cannot_draw_is_reported() {
     assert!(!render_into(&mut doc).unwrap().warnings.iter().any(|w| w.contains("standard fonts")));
 }
 
+/// The `Helv` font a one-draw form writing `text` puts on its page.
+fn helv(text: &str) -> (Dict, Vec<u8>, Vec<String>) {
+    let xdp = format!(
+        r##"<?xml version="1.0" encoding="UTF-8"?>
+<xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/"><template xmlns="http://www.xfa.org/schema/xfa-template/3.3/"><subform name="form" layout="tb">
+<draw w="7in" h="5in"><font typeface="Helvetica"/><value><text>{text}</text></value></draw>
+</subform></template></xdp:xdp>"##
+    );
+    let mut doc = Document::open(Arc::new(shell(&xdp))).unwrap();
+    let warnings = render_into(&mut doc).unwrap().warnings;
+    let root = doc.get(doc.root().unwrap());
+    let pages = doc.get(root.as_dict().unwrap().reference(b"Pages").unwrap());
+    let kids = pages.as_dict().unwrap().get(b"Kids").map(|k| doc.resolve(k)).unwrap();
+    let page = doc.get(kids.as_array().unwrap()[0].as_ref().unwrap()).as_dict().unwrap().clone();
+    let resources = doc.resolve(page.get(b"Resources").unwrap());
+    let fonts = doc.resolve(resources.as_dict().unwrap().get(b"Font").unwrap());
+    let font = doc.resolve(fonts.as_dict().unwrap().get(b"Helv").unwrap()).as_dict().unwrap().clone();
+    let contents = doc.get(page.reference(b"Contents").unwrap());
+    let Object::Stream(s) = &*contents else { panic!("not a stream") };
+    (font, s.decoded().unwrap().to_vec(), warnings)
+}
+
+/// Romanian text (#7526) is written with codes of its own for ă ș ț, named in `/Differences`
+/// over WinAnsiEncoding and as wide as a, s and t, and isn't reported as undrawable. A code
+/// the page's text writes in WinAnsiEncoding (€ is 0x80) is never given to a letter.
+#[test]
+fn romanian_letters_get_codes_of_their_own() {
+    let (font, content, warnings) = helv("€ Vă rog să confirmaţi şi ţ ț");
+    assert!(!warnings.iter().any(|w| w.contains("standard fonts")), "{warnings:?}");
+    let encoding = font.get(b"Encoding").and_then(Object::as_dict).expect("an encoding dictionary");
+    assert_eq!(encoding.name(b"BaseEncoding"), Some(&b"WinAnsiEncoding"[..]));
+    let differences = encoding.get(b"Differences").and_then(Object::as_array).unwrap();
+    let names: Vec<(i64, String)> =
+        differences.chunks(2).map(|p| (p[0].as_int().unwrap(), String::from_utf8_lossy(p[1].as_name().unwrap()).into_owned())).collect();
+    let code = |n: &str| names.iter().find(|(_, name)| name == n).map(|(c, _)| *c).unwrap_or_else(|| panic!("{n}: {names:?}"));
+    let codes = [code("abreve"), code("scedilla"), code("tcedilla"), code("uni021B")];
+    assert!(codes.iter().all(|&c| (0x81..=0xFF).contains(&c)), "€ keeps 0x80: {names:?}");
+    // The content writes the letters with those codes, and no `?`; € is still 0x80.
+    let [a, s, t, t_comma] = codes.map(|c| u8::try_from(c).unwrap());
+    let written: Vec<u8> = [&[0x80][..], b" V", &[a], b" rog s", &[a], b" confirma", &[t], b"i ", &[s], b"i ", &[t], b" ", &[t_comma]].concat();
+    let shown = String::from_utf8_lossy(&content).into_owned();
+    assert!(content.windows(written.len()).any(|w| w == written), "{shown}");
+    assert!(!content.contains(&b'?'), "{shown}");
+    let widths = font.get(b"Widths").and_then(Object::as_array).unwrap();
+    assert_eq!((font.int(b"FirstChar"), font.int(b"LastChar"), widths.len()), (Some(32), Some(255), 224));
+    let width = |code: i64| widths[usize::try_from(code - 32).unwrap()].as_f64().unwrap();
+    assert_eq!([width(codes[0]), width(codes[1]), width(codes[2]), width(codes[3])], [556.0, 500.0, 278.0, 278.0]);
+    assert_eq!(width(i64::from(b'a')), 556.0);
+    // Text WinAnsiEncoding holds keeps the plain encoding and no widths, as before.
+    let (font, ..) = helv("Name and signature");
+    assert_eq!(font.name(b"Encoding"), Some(&b"WinAnsiEncoding"[..]));
+    assert!(font.get(b"Widths").is_none());
+}
+
+/// When the page's text leaves no code free for an accented letter, the letter is written as `?`
+/// and reported, never given a code another character needs.
+#[test]
+fn an_accented_letter_with_no_free_code_is_reported() {
+    let high: String = (0xA1..=0xFFu32).filter_map(char::from_u32).collect::<String>() + "€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ";
+    let letters: String = (0x100..=0x17Fu32).filter_map(char::from_u32).collect();
+    let (font, content, warnings) = helv(&format!("{high} {letters}"));
+    let encoding = font.get(b"Encoding").and_then(Object::as_dict);
+    let differences = encoding.and_then(|e| e.get(b"Differences")).and_then(Object::as_array).cloned().unwrap_or_default();
+    // Only codes WinAnsiEncoding leaves undefined (0x81 0x8D 0x8F 0x90 0x9D) or the page doesn't
+    // write were free: the no-break space isn't in the text, and the layout takes the soft hyphen
+    // out and writes ‘ ’ – as ' and -.
+    let free = [0x81, 0x8D, 0x8F, 0x90, 0x9D, 0xA0, 0xAD, 0x91, 0x92, 0x96];
+    let codes: Vec<i64> = differences.iter().filter_map(Object::as_int).collect();
+    assert!(!codes.is_empty() && codes.iter().all(|c| free.contains(c)), "{differences:?}");
+    assert!(content.contains(&b'?'), "the letters left over are ?");
+    assert!(warnings.iter().any(|w| w.contains("standard fonts can't draw")), "{warnings:?}");
+}
+
 /// A template whose page shows objects only on screen (`relevant="-print"`), only in print
 /// (`presence="invisible" relevant="+print"`) and everywhere, as fields and as draws, some of
 /// them inside a screen-only subform. `others` is put in the catalog (its own layers).

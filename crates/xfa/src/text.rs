@@ -129,11 +129,133 @@ impl Face {
 
     /// Advance of `s` at this face's size: the standard-14 font it is drawn in, at that font's
     /// own widths (ISO 32000-2 Annex D) and encoded as it is written, then the horizontal scale.
+    /// A letter of [`ACCENTED`] advances as far as its base letter, as the page writes it.
     pub fn width(&self, s: &str) -> f64 {
         #[cfg(test)]
         MEASURED.with(|m| m.set(m.get().saturating_add(s.len() as u64)));
-        self.family.std14(self.bold, self.italic).text_width(s, self.size) * self.h_scale
+        let font = self.family.std14(self.bold, self.italic);
+        let width = if s.chars().any(|c| accented(c).is_some()) {
+            font.text_width(&s.chars().map(|c| accented(c).map_or(c, |(_, base)| base)).collect::<String>(), self.size)
+        } else {
+            font.text_width(s, self.size)
+        };
+        width * self.h_scale
     }
+}
+
+/// Latin letters WinAnsiEncoding has no code for that the standard fonts still draw: each is a
+/// letter of WinAnsi with one accent, named in the font's encoding by its glyph name (the Adobe
+/// Glyph List's, or `uniXXXX` for Ț ț, which it doesn't name), and as wide as that letter, as in
+/// the published standard-14 metrics. Romanian ă ș ț and ş ţ are among them (#7526). The
+/// renderer builds the ones its stand-in fonts lack from the base letter and the accent.
+/// Letters on a dotless i (ĩ ī ĭ) and ones whose accent changes their width (ď ľ ť) aren't here.
+const ACCENTED: &[(char, &str, char)] = &[
+    ('Ā', "Amacron", 'A'),
+    ('ā', "amacron", 'a'),
+    ('Ă', "Abreve", 'A'),
+    ('ă', "abreve", 'a'),
+    ('Ą', "Aogonek", 'A'),
+    ('ą', "aogonek", 'a'),
+    ('Ć', "Cacute", 'C'),
+    ('ć', "cacute", 'c'),
+    ('Ĉ', "Ccircumflex", 'C'),
+    ('ĉ', "ccircumflex", 'c'),
+    ('Ċ', "Cdotaccent", 'C'),
+    ('ċ', "cdotaccent", 'c'),
+    ('Č', "Ccaron", 'C'),
+    ('č', "ccaron", 'c'),
+    ('Ď', "Dcaron", 'D'),
+    ('Ē', "Emacron", 'E'),
+    ('ē', "emacron", 'e'),
+    ('Ĕ', "Ebreve", 'E'),
+    ('ĕ', "ebreve", 'e'),
+    ('Ė', "Edotaccent", 'E'),
+    ('ė', "edotaccent", 'e'),
+    ('Ę', "Eogonek", 'E'),
+    ('ę', "eogonek", 'e'),
+    ('Ě', "Ecaron", 'E'),
+    ('ě', "ecaron", 'e'),
+    ('Ĝ', "Gcircumflex", 'G'),
+    ('ĝ', "gcircumflex", 'g'),
+    ('Ğ', "Gbreve", 'G'),
+    ('ğ', "gbreve", 'g'),
+    ('Ġ', "Gdotaccent", 'G'),
+    ('ġ', "gdotaccent", 'g'),
+    ('Ģ', "Gcommaaccent", 'G'),
+    ('Ĥ', "Hcircumflex", 'H'),
+    ('ĥ', "hcircumflex", 'h'),
+    ('Ĩ', "Itilde", 'I'),
+    ('Ī', "Imacron", 'I'),
+    ('Ĭ', "Ibreve", 'I'),
+    ('Į', "Iogonek", 'I'),
+    ('į', "iogonek", 'i'),
+    ('İ', "Idotaccent", 'I'),
+    ('Ĵ', "Jcircumflex", 'J'),
+    ('Ķ', "Kcommaaccent", 'K'),
+    ('ķ', "kcommaaccent", 'k'),
+    ('Ĺ', "Lacute", 'L'),
+    ('ĺ', "lacute", 'l'),
+    ('Ļ', "Lcommaaccent", 'L'),
+    ('ļ', "lcommaaccent", 'l'),
+    ('Ń', "Nacute", 'N'),
+    ('ń', "nacute", 'n'),
+    ('Ņ', "Ncommaaccent", 'N'),
+    ('ņ', "ncommaaccent", 'n'),
+    ('Ň', "Ncaron", 'N'),
+    ('ň', "ncaron", 'n'),
+    ('Ō', "Omacron", 'O'),
+    ('ō', "omacron", 'o'),
+    ('Ŏ', "Obreve", 'O'),
+    ('ŏ', "obreve", 'o'),
+    ('Ő', "Ohungarumlaut", 'O'),
+    ('ő', "ohungarumlaut", 'o'),
+    ('Ŕ', "Racute", 'R'),
+    ('ŕ', "racute", 'r'),
+    ('Ŗ', "Rcommaaccent", 'R'),
+    ('ŗ', "rcommaaccent", 'r'),
+    ('Ř', "Rcaron", 'R'),
+    ('ř', "rcaron", 'r'),
+    ('Ś', "Sacute", 'S'),
+    ('ś', "sacute", 's'),
+    ('Ŝ', "Scircumflex", 'S'),
+    ('ŝ', "scircumflex", 's'),
+    ('Ş', "Scedilla", 'S'),
+    ('ş', "scedilla", 's'),
+    ('Ţ', "Tcedilla", 'T'),
+    ('ţ', "tcedilla", 't'),
+    ('Ť', "Tcaron", 'T'),
+    ('Ũ', "Utilde", 'U'),
+    ('ũ', "utilde", 'u'),
+    ('Ū', "Umacron", 'U'),
+    ('ū', "umacron", 'u'),
+    ('Ŭ', "Ubreve", 'U'),
+    ('ŭ', "ubreve", 'u'),
+    ('Ů', "Uring", 'U'),
+    ('ů', "uring", 'u'),
+    ('Ű', "Uhungarumlaut", 'U'),
+    ('ű', "uhungarumlaut", 'u'),
+    ('Ų', "Uogonek", 'U'),
+    ('ų', "uogonek", 'u'),
+    ('Ŵ', "Wcircumflex", 'W'),
+    ('ŵ', "wcircumflex", 'w'),
+    ('Ŷ', "Ycircumflex", 'Y'),
+    ('ŷ', "ycircumflex", 'y'),
+    ('Ź', "Zacute", 'Z'),
+    ('ź', "zacute", 'z'),
+    ('Ż', "Zdotaccent", 'Z'),
+    ('ż', "zdotaccent", 'z'),
+    ('Ș', "Scommaaccent", 'S'),
+    ('ș', "scommaaccent", 's'),
+    ('Ț', "uni021A", 'T'),
+    ('ț', "uni021B", 't'),
+];
+
+/// The glyph name and base letter of `c` when it is one of [`ACCENTED`].
+pub(crate) fn accented(c: char) -> Option<(&'static str, char)> {
+    if u32::from(c) < 0x100 {
+        return None;
+    }
+    ACCENTED.iter().find(|(letter, ..)| *letter == c).map(|&(_, name, base)| (name, base))
 }
 
 // Bytes of text measured on this thread, for tests that bound layout work.
